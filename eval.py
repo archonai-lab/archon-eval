@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -484,12 +485,116 @@ def cmd_list(conn: sqlite3.Connection, args) -> None:
 # Vesper's metrics commands
 # ---------------------------------------------------------------------------
 
+def _auto_score_delta(messages: list[dict]) -> list[dict]:
+    """Use Gemini to auto-score contribution deltas for a list of messages."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY not set. Required for --auto scoring.")
+        sys.exit(1)
+
+    results = []
+    history_so_far = []
+
+    for i, msg in enumerate(messages):
+        history_text = "\n".join(
+            f"[{h['agent_id']}]: {h['content']}" for h in history_so_far
+        ) or "(no prior messages)"
+
+        prompt_text = f"""Score this meeting message for contribution delta.
+
+Prior messages:
+{history_text}
+
+New message from [{msg['agent_id']}]:
+{msg['content']}
+
+Score:
+0 = echo/restatement of what was already said
+1 = adds detail or evidence to an existing claim
+2 = introduces a new claim, constraint, or contradiction
+
+Reply with ONLY a JSON object: {{"score": 0|1|2, "reason": "one sentence"}}"""
+
+        try:
+            result = subprocess.run(
+                ["gemini", "-p", prompt_text, "--model", "gemini-2.0-flash"],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "GEMINI_API_KEY": api_key},
+            )
+            raw = result.stdout.strip()
+            # Try to parse JSON from response (may have markdown fencing)
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
+            score = max(0, min(2, int(parsed.get("score", 1))))
+            reason = parsed.get("reason", "")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+            score = 1  # default to "adds detail" on failure
+            reason = f"auto-score failed: {e}"
+
+        results.append({
+            "agent_id": msg["agent_id"],
+            "message_index": i,
+            "delta_score": score,
+            "notes": reason,
+        })
+        history_so_far.append(msg)
+        print(f"  [{msg['agent_id']}] msg {i}: delta={score} — {reason}")
+
+    return results
+
+
 def cmd_delta(conn: sqlite3.Connection, args) -> None:
     meeting_id = args.meeting_id
     m = conn.execute("SELECT id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
     if not m:
         print(f"Meeting {meeting_id} not found.")
         sys.exit(1)
+
+    # --auto mode: read messages from log file and score with Gemini
+    if getattr(args, "auto", False):
+        log_file = args.log
+        if not log_file:
+            print("Error: --auto requires --log <path> pointing to a meeting log file.")
+            sys.exit(1)
+
+        # Parse speaking turns from log
+        messages = []
+        with open(log_file) as f:
+            for line in f:
+                # Match: 💬 [agent_id] content  OR  [agent] Speaking: "content..."
+                if "💬 [" in line:
+                    parts = line.split("💬 [", 1)[1]
+                    agent_id = parts.split("]", 1)[0]
+                    content = parts.split("]", 1)[1].strip()
+                    messages.append({"agent_id": agent_id, "content": content[:500]})
+                elif '] Speaking: "' in line:
+                    agent_id = line.split("] Speaking:")[0].split("[")[-1]
+                    content = line.split('Speaking: "', 1)[1].rstrip('"\n')
+                    messages.append({"agent_id": agent_id, "content": content[:500]})
+
+        if not messages:
+            print(f"No speaking turns found in {log_file}")
+            sys.exit(1)
+
+        print(f"\nAuto-scoring {len(messages)} messages from {log_file}...\n")
+        deltas = _auto_score_delta(messages)
+
+        # Clear existing deltas for this meeting
+        conn.execute("DELETE FROM contribution_deltas WHERE meeting_id=?", (meeting_id,))
+
+        for d in deltas:
+            conn.execute(
+                "INSERT INTO contribution_deltas (meeting_id, agent_id, message_index, delta_score, notes) VALUES (?,?,?,?,?)",
+                (meeting_id, d["agent_id"], d["message_index"], d["delta_score"], d.get("notes")),
+            )
+
+        avg = conn.execute(
+            "SELECT AVG(delta_score) FROM contribution_deltas WHERE meeting_id=?", (meeting_id,)
+        ).fetchone()[0]
+        conn.execute("UPDATE meetings SET contribution_delta_avg=? WHERE id=?", (avg, meeting_id))
+        conn.commit()
+        print(f"\nAuto-scored {len(deltas)} messages. Avg delta: {avg:.2f}")
+        return
 
     if not sys.stdin.isatty():
         data = json.load(sys.stdin)
@@ -499,7 +604,6 @@ def cmd_delta(conn: sqlite3.Connection, args) -> None:
                 "INSERT INTO contribution_deltas (meeting_id, agent_id, message_index, delta_score, notes) VALUES (?,?,?,?,?)",
                 (meeting_id, d["agent_id"], d["message_index"], d["delta_score"], d.get("notes")),
             )
-        # Update avg on meetings table
         avg = conn.execute(
             "SELECT AVG(delta_score) FROM contribution_deltas WHERE meeting_id=?", (meeting_id,)
         ).fetchone()[0]
@@ -627,6 +731,8 @@ def main():
 
     p_delta = sub.add_parser("delta", help="Score contribution deltas per message")
     p_delta.add_argument("meeting_id")
+    p_delta.add_argument("--auto", action="store_true", help="Auto-score with Gemini (requires GEMINI_API_KEY)")
+    p_delta.add_argument("--log", help="Path to meeting log file (required for --auto)")
 
     sub.add_parser("lag", help="Record decision outcome tracking")
 
