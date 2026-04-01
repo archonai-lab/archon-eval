@@ -9,6 +9,7 @@ Reads ~/.archon/evaluations.db, writes charts to
 dashboard.md to /home/leviathanst/archon-vision/docs/archon-agent/dashboard.md
 """
 
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -25,8 +26,9 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 DB_PATH     = Path.home() / ".archon" / "evaluations.db"
-CHARTS_DIR  = Path("/home/leviathanst/archon-vision/docs/archon-agent/charts")
-DASHBOARD   = Path("/home/leviathanst/archon-vision/docs/archon-agent/dashboard.md")
+VISION_DIR  = Path(os.environ.get("ARCHON_VISION_DIR", str(Path.home() / "archon-vision")))
+CHARTS_DIR  = VISION_DIR / "public" / "charts"
+DASHBOARD   = VISION_DIR / "docs" / "archon-agent" / "dashboard.md"
 
 CHARTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -536,13 +538,13 @@ def generate_dashboard(meetings, agent_metrics) -> str:
 
 ## Trends
 
-![Participation & Phases](charts/participation.png)
+![Participation & Phases](/charts/participation.png)
 
-![Tool Usage](charts/tool-usage.png)
+![Tool Usage](/charts/tool-usage.png)
 
-![Duration](charts/duration.png)
+![Duration](/charts/duration.png)
 
-![Quality Scores](charts/quality.png)
+![Quality Scores](/charts/quality.png)
 
 ## Meeting Log
 
