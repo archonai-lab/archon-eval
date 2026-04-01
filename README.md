@@ -43,13 +43,10 @@ python3 eval.py init
 
 ### Auto-scoring with Gemini
 
-The `delta --auto` flag uses Gemini 2.0 Flash to automatically score each message's contribution delta from a meeting log file.
+The `delta --auto` flag uses `gemini` CLI (Gemini 2.5 Flash) to automatically score each message's contribution delta from a meeting log file. Uses cached credentials — no API key needed.
 
 ```bash
-# Set your Gemini API key
-export GEMINI_API_KEY=your_key_here
-
-# Auto-score from a meeting log
+# Auto-score from a meeting log (gemini CLI must be authenticated)
 python3 eval.py delta pr19-review-torque --auto --log /tmp/review-meeting.log
 ```
 
@@ -58,7 +55,7 @@ The scorer reads speaking turns from the log, builds conversation history increm
 - **1** = adds detail or evidence to an existing claim
 - **2** = introduces a new claim, constraint, or contradiction
 
-**Requirements:** `gemini` CLI installed, `GEMINI_API_KEY` set.
+**Requirements:** `gemini` CLI installed and authenticated (`gemini` uses cached browser login credentials).
 
 ## Metrics
 
