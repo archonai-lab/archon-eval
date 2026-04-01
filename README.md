@@ -1,6 +1,6 @@
 # archon-eval
 
-Meeting evaluation CLI for Archon agent meetings. Stores structured metrics and quality scores locally in SQLite. The tool is open source — your data lives at `~/.archon/evaluations.db` and never leaves your machine.
+Meeting evaluation CLI for AI agent meetings. Stores structured metrics and quality scores locally in SQLite. Your data lives at `~/.archon/evaluations.db` and never leaves your machine.
 
 ## Install
 
@@ -26,12 +26,12 @@ python3 eval.py init
 | `init` | Create the DB and schema |
 | `add <meeting_id>` | Add a meeting record (interactive, or JSON from stdin) |
 | `agent <meeting_id> <agent_id>` | Add agent metrics for a meeting |
-| `score <meeting_id>` | Add CEO quality scores for a meeting |
+| `score <meeting_id>` | Add quality scores for a meeting |
 | `trend` | Print trend table with all metrics |
 | `show <meeting_id>` | Show all data for a specific meeting |
 | `list` | List all meetings |
 
-### Vesper's Metrics
+### Advanced Metrics
 
 | Command | Description |
 |---------|-------------|
@@ -87,11 +87,11 @@ The scorer reads speaking turns from the log, builds conversation history increm
 | New info | 2 | 0=restated known. 1=surfaced. 2=changed understanding. |
 | Actionable | 2 | 0=vague. 1=clear steps. 2=assigned owners. |
 
-> Note: The 0-9 rubric is kept for backward compatibility. Vesper's metrics are more objective and comparable. Use Decision Yield as the primary indicator.
+> Note: The 0-9 rubric is kept for backward compatibility. The advanced metrics are more objective and comparable. Use Decision Yield as the primary indicator.
 
 ## Dashboard
 
-Generate charts + markdown for archon-vision:
+Generate charts + markdown dashboard:
 ```bash
 python3 dashboard.py
 ```
@@ -104,15 +104,15 @@ Outputs matplotlib PNGs to `$ARCHON_VISION_DIR/public/charts/` and a dashboard.m
 ./post-meeting.sh <meeting_id> --logs <prefix>
 ```
 
-Auto-extracts metrics from runner logs, interactive CEO scoring, regenerates dashboard, commits to archon-vision.
+Auto-extracts metrics from runner logs, interactive scoring, regenerates dashboard.
 
 ## Schema
 
 Five tables:
 
-- **`meetings`** — one row per meeting. Static metrics + Vesper's computed columns (decision_yield, phase_utilization, contribution_delta_avg).
+- **`meetings`** — one row per meeting. Static metrics + computed columns (decision_yield, phase_utilization, contribution_delta_avg).
 - **`agent_metrics`** — one row per agent per meeting. LLM latency, nmem calls, relevance signals.
-- **`quality_scores`** — one row per meeting. Legacy 0-9 CEO scores.
+- **`quality_scores`** — one row per meeting. Legacy 0-9 quality scores.
 - **`contribution_deltas`** — one row per message per meeting. Delta scores (0-2) with notes.
 - **`outcome_lag`** — tracks decisions across meetings. Status: executed, referenced, contradicted, never_referenced.
 
