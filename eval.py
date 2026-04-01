@@ -486,12 +486,7 @@ def cmd_list(conn: sqlite3.Connection, args) -> None:
 # ---------------------------------------------------------------------------
 
 def _auto_score_delta(messages: list[dict]) -> list[dict]:
-    """Use Gemini to auto-score contribution deltas for a list of messages."""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY not set. Required for --auto scoring.")
-        sys.exit(1)
-
+    """Use Gemini CLI to auto-score contribution deltas for a list of messages."""
     results = []
     history_so_far = []
 
@@ -519,7 +514,6 @@ Reply with ONLY a JSON object: {{"score": 0|1|2, "reason": "one sentence"}}"""
             result = subprocess.run(
                 ["gemini", "-p", prompt_text, "--model", "gemini-2.0-flash"],
                 capture_output=True, text=True, timeout=30,
-                env={**os.environ, "GEMINI_API_KEY": api_key},
             )
             raw = result.stdout.strip()
             # Try to parse JSON from response (may have markdown fencing)
