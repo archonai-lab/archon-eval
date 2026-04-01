@@ -72,6 +72,33 @@ CREATE TABLE IF NOT EXISTS quality_scores (
     notes               TEXT,
     created_at          TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS contribution_deltas (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id      TEXT NOT NULL REFERENCES meetings(id),
+    agent_id        TEXT NOT NULL,
+    message_index   INTEGER NOT NULL,
+    delta_score     INTEGER CHECK(delta_score BETWEEN 0 AND 2),
+    notes           TEXT,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS outcome_lag (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_meeting_id     TEXT NOT NULL REFERENCES meetings(id),
+    decision_description    TEXT NOT NULL,
+    referenced_meeting_id   TEXT REFERENCES meetings(id),
+    lag_meetings            INTEGER,
+    status                  TEXT CHECK(status IN ('executed','referenced','contradicted','never_referenced')),
+    created_at              TEXT DEFAULT (datetime('now'))
+);
+"""
+
+SCHEMA_MIGRATE = """
+-- Add Vesper's metrics columns to meetings (idempotent via try/except in Python)
+-- decision_yield: decisions_made / phases_completed
+-- phase_utilization: avg fraction of agents who spoke per phase (0.0-1.0)
+-- contribution_delta_avg: avg delta score across all messages (0.0-2.0)
 """
 
 
@@ -85,6 +112,16 @@ def get_db(path: Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Migrate: add new columns to existing tables (idempotent)
+    for col, typ in [
+        ("decision_yield", "REAL"),
+        ("phase_utilization", "REAL"),
+        ("contribution_delta_avg", "REAL"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE meetings ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
 
 
@@ -304,6 +341,9 @@ def cmd_trend(conn: sqlite3.Connection, args) -> None:
             m.decisions_made,
             m.bugs_found,
             m.duration_seconds,
+            m.decision_yield,
+            m.phase_utilization,
+            m.contribution_delta_avg,
             q.total_score
         FROM meetings m
         LEFT JOIN quality_scores q ON q.meeting_id = m.id
@@ -319,7 +359,8 @@ def cmd_trend(conn: sqlite3.Connection, args) -> None:
     header = (
         f"{'Date':<12} {'ID':<14} {'Title':<28} "
         f"{'Part%':>5} {'Phases':>6} {'Tools':>5} "
-        f"{'XRef':>4} {'Bugs':>4} {'Score':>5} {'Min':>5}"
+        f"{'D.Yld':>5} {'P.Utl':>5} {'Delta':>5} "
+        f"{'Score':>5} {'Min':>5}"
     )
     print(header)
     print("-" * len(header))
@@ -337,11 +378,14 @@ def cmd_trend(conn: sqlite3.Connection, args) -> None:
         )
         score = f"{r['total_score']}/9" if r["total_score"] is not None else "-"
         mins  = f"{r['duration_seconds']/60:.1f}" if r["duration_seconds"] else "-"
+        dy    = f"{r['decision_yield']:.1f}" if r["decision_yield"] is not None else "-"
+        pu    = f"{r['phase_utilization']:.2f}" if r["phase_utilization"] is not None else "-"
+        cd    = f"{r['contribution_delta_avg']:.1f}" if r["contribution_delta_avg"] is not None else "-"
         title = (r["title"] or "")[:27]
         print(
             f"{r['date']:<12} {r['id']:<14} {title:<28} "
             f"{part_pct:>5} {phases:>6} {r['total_tool_calls'] or 0:>5} "
-            f"{_bool_str(r['cross_reference']):>4} {r['bugs_found'] or 0:>4} "
+            f"{dy:>5} {pu:>5} {cd:>5} "
             f"{score:>5} {mins:>5}"
         )
 
@@ -437,6 +481,115 @@ def cmd_list(conn: sqlite3.Connection, args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Vesper's metrics commands
+# ---------------------------------------------------------------------------
+
+def cmd_delta(conn: sqlite3.Connection, args) -> None:
+    meeting_id = args.meeting_id
+    m = conn.execute("SELECT id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+    if not m:
+        print(f"Meeting {meeting_id} not found.")
+        sys.exit(1)
+
+    if not sys.stdin.isatty():
+        data = json.load(sys.stdin)
+        # Expect: {"deltas": [{"agent_id": "x", "message_index": 0, "delta_score": 2, "notes": "..."}, ...]}
+        for d in data.get("deltas", [data]):
+            conn.execute(
+                "INSERT INTO contribution_deltas (meeting_id, agent_id, message_index, delta_score, notes) VALUES (?,?,?,?,?)",
+                (meeting_id, d["agent_id"], d["message_index"], d["delta_score"], d.get("notes")),
+            )
+        # Update avg on meetings table
+        avg = conn.execute(
+            "SELECT AVG(delta_score) FROM contribution_deltas WHERE meeting_id=?", (meeting_id,)
+        ).fetchone()[0]
+        conn.execute("UPDATE meetings SET contribution_delta_avg=? WHERE id=?", (avg, meeting_id))
+        conn.commit()
+        print(f"Contribution deltas for {meeting_id} saved. Avg: {avg:.2f}")
+        return
+
+    print(f"\nContribution Delta scoring for {meeting_id}")
+    print("Per message: 0=echo, 1=adds detail, 2=new claim/constraint\n")
+    idx = 0
+    while True:
+        agent = input(f"  Agent (or 'done'): ").strip()
+        if agent.lower() == "done":
+            break
+        score = prompt(f"  Delta score for {agent} msg {idx}", cast=int)
+        notes = prompt(f"  Notes", optional=True)
+        conn.execute(
+            "INSERT INTO contribution_deltas (meeting_id, agent_id, message_index, delta_score, notes) VALUES (?,?,?,?,?)",
+            (meeting_id, agent, idx, score, notes),
+        )
+        idx += 1
+
+    avg = conn.execute(
+        "SELECT AVG(delta_score) FROM contribution_deltas WHERE meeting_id=?", (meeting_id,)
+    ).fetchone()[0]
+    conn.execute("UPDATE meetings SET contribution_delta_avg=? WHERE id=?", (avg, meeting_id))
+    conn.commit()
+    print(f"\nDeltas saved. Avg: {avg:.2f}" if avg else "\nNo deltas recorded.")
+
+
+def cmd_lag(conn: sqlite3.Connection, args) -> None:
+    if not sys.stdin.isatty():
+        data = json.load(sys.stdin)
+        conn.execute(
+            "INSERT INTO outcome_lag (decision_meeting_id, decision_description, referenced_meeting_id, lag_meetings, status) VALUES (?,?,?,?,?)",
+            (data["decision_meeting_id"], data["decision_description"],
+             data.get("referenced_meeting_id"), data.get("lag_meetings"), data.get("status", "never_referenced")),
+        )
+        conn.commit()
+        print(f"Outcome lag recorded.")
+        return
+
+    print("\nRecord decision outcome tracking")
+    meeting_id = prompt("Decision meeting ID")
+    desc = prompt("Decision description")
+    ref_meeting = prompt("Referenced in meeting ID", optional=True)
+    lag = prompt("Lag (meetings between)", cast=int, optional=True)
+    status = prompt("Status (executed/referenced/contradicted/never_referenced)", default="never_referenced")
+    conn.execute(
+        "INSERT INTO outcome_lag (decision_meeting_id, decision_description, referenced_meeting_id, lag_meetings, status) VALUES (?,?,?,?,?)",
+        (meeting_id, desc, ref_meeting, lag, status),
+    )
+    conn.commit()
+    print("Outcome lag recorded.")
+
+
+def cmd_yield(conn: sqlite3.Connection, args) -> None:
+    meeting_id = args.meeting_id
+    m = conn.execute("SELECT decisions_made, phases_completed FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+    if not m:
+        print(f"Meeting {meeting_id} not found.")
+        sys.exit(1)
+
+    decisions = m["decisions_made"] or 0
+    phases = m["phases_completed"] or 1
+    dy = decisions / phases
+    conn.execute("UPDATE meetings SET decision_yield=? WHERE id=?", (dy, meeting_id))
+    conn.commit()
+    print(f"Decision Yield for {meeting_id}: {dy:.2f} ({decisions} decisions / {phases} phases)")
+
+
+def cmd_utilization(conn: sqlite3.Connection, args) -> None:
+    meeting_id = args.meeting_id
+    m = conn.execute("SELECT agents_participated FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+    if not m:
+        print(f"Meeting {meeting_id} not found.")
+        sys.exit(1)
+
+    if not sys.stdin.isatty():
+        val = float(sys.stdin.read().strip())
+    else:
+        val = prompt("Phase utilization (0.0-1.0)", cast=float)
+
+    conn.execute("UPDATE meetings SET phase_utilization=? WHERE id=?", (val, meeting_id))
+    conn.commit()
+    print(f"Phase utilization for {meeting_id}: {val:.2f}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -472,6 +625,17 @@ def main():
 
     sub.add_parser("list",  help="List all meetings")
 
+    p_delta = sub.add_parser("delta", help="Score contribution deltas per message")
+    p_delta.add_argument("meeting_id")
+
+    sub.add_parser("lag", help="Record decision outcome tracking")
+
+    p_yield = sub.add_parser("yield", help="Compute decision yield for a meeting")
+    p_yield.add_argument("meeting_id")
+
+    p_util = sub.add_parser("utilization", help="Set phase utilization for a meeting")
+    p_util.add_argument("meeting_id")
+
     args = parser.parse_args()
     conn = get_db(args.db)
 
@@ -479,13 +643,17 @@ def main():
     init_db(conn)
 
     dispatch = {
-        "init":  cmd_init,
-        "add":   cmd_add,
-        "agent": cmd_agent,
-        "score": cmd_score,
-        "trend": cmd_trend,
-        "show":  cmd_show,
-        "list":  cmd_list,
+        "init":        cmd_init,
+        "add":         cmd_add,
+        "agent":       cmd_agent,
+        "score":       cmd_score,
+        "trend":       cmd_trend,
+        "show":        cmd_show,
+        "list":        cmd_list,
+        "delta":       cmd_delta,
+        "lag":         cmd_lag,
+        "yield":       cmd_yield,
+        "utilization": cmd_utilization,
     }
     dispatch[args.command](conn, args)
 
