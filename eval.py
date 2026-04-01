@@ -512,7 +512,7 @@ Reply with ONLY a JSON object: {{"score": 0|1|2, "reason": "one sentence"}}"""
 
         try:
             result = subprocess.run(
-                ["gemini", "-p", prompt_text, "--model", "gemini-2.0-flash"],
+                ["gemini", "-p", prompt_text, "--model", "gemini-2.5-flash"],
                 capture_output=True, text=True, timeout=30,
             )
             raw = result.stdout.strip()
