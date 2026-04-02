@@ -10,7 +10,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_DEFAULT = Path.home() / ".archon" / "evaluations.db"
+DB_DEFAULT = Path(os.environ.get("ARCHON_EVAL_DB", str(Path.home() / ".archon" / "evaluations.db")))
+GEMINI_MODEL = os.environ.get("ARCHON_EVAL_MODEL", "gemini-2.5-flash")
+GEMINI_TIMEOUT = int(os.environ.get("ARCHON_EVAL_TIMEOUT", "60"))
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +514,8 @@ Reply with ONLY a JSON object: {{"score": 0|1|2, "reason": "one sentence"}}"""
 
         try:
             result = subprocess.run(
-                ["gemini", "-p", prompt_text, "--model", "gemini-2.5-flash"],
-                capture_output=True, text=True, timeout=60,
+                ["gemini", "-p", prompt_text, "--model", GEMINI_MODEL],
+                capture_output=True, text=True, timeout=GEMINI_TIMEOUT,
             )
             raw = result.stdout.strip()
             # Try to parse JSON from response (may have markdown fencing)
