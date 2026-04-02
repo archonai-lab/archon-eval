@@ -10,9 +10,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_DEFAULT = Path(os.environ.get("ARCHON_EVAL_DB", str(Path.home() / ".archon" / "evaluations.db")))
-GEMINI_MODEL = os.environ.get("ARCHON_EVAL_MODEL", "gemini-2.5-flash")
-GEMINI_TIMEOUT = int(os.environ.get("ARCHON_EVAL_TIMEOUT", "60"))
+DB_DEFAULT = Path.home() / ".archon" / "evaluations.db"
+MODEL_DEFAULT = "gemini-2.5-flash"
+TIMEOUT_DEFAULT = 60
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +487,7 @@ def cmd_list(conn: sqlite3.Connection, args) -> None:
 # Vesper's metrics commands
 # ---------------------------------------------------------------------------
 
-def _auto_score_delta(messages: list[dict]) -> list[dict]:
+def _auto_score_delta(messages: list[dict], model: str = MODEL_DEFAULT, timeout: int = TIMEOUT_DEFAULT) -> list[dict]:
     """Use Gemini CLI to auto-score contribution deltas for a list of messages."""
     results = []
     history_so_far = []
@@ -514,8 +514,8 @@ Reply with ONLY a JSON object: {{"score": 0|1|2, "reason": "one sentence"}}"""
 
         try:
             result = subprocess.run(
-                ["gemini", "-p", prompt_text, "--model", GEMINI_MODEL],
-                capture_output=True, text=True, timeout=GEMINI_TIMEOUT,
+                ["gemini", "-p", prompt_text, "--model", model],
+                capture_output=True, text=True, timeout=timeout,
             )
             raw = result.stdout.strip()
             # Try to parse JSON from response (may have markdown fencing)
@@ -573,7 +573,7 @@ def cmd_delta(conn: sqlite3.Connection, args) -> None:
             sys.exit(1)
 
         print(f"\nAuto-scoring {len(messages)} messages from {log_file}...\n")
-        deltas = _auto_score_delta(messages)
+        deltas = _auto_score_delta(messages, model=args.model, timeout=args.timeout)
 
         # Clear existing deltas for this meeting
         conn.execute("DELETE FROM contribution_deltas WHERE meeting_id=?", (meeting_id,))
@@ -703,6 +703,17 @@ def main():
         type=Path,
         default=DB_DEFAULT,
         help=f"Path to SQLite DB (default: {DB_DEFAULT})",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL_DEFAULT,
+        help=f"Gemini model for auto-scoring (default: {MODEL_DEFAULT})",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=TIMEOUT_DEFAULT,
+        help=f"Timeout in seconds for Gemini CLI calls (default: {TIMEOUT_DEFAULT})",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
